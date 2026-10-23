@@ -21,6 +21,8 @@ export type LeadRecord = {
   notes: string;
   /** Column F verbatim. This is the editable field the dashboard writes back to. */
   notesCell: string;
+  /** Appointment progress radio value: "asked", "set", "met", or empty. */
+  appointment: string;
   /** Column G verbatim (Summary) -- the LinkedIn transcript. Never mixed with F. */
   conversation: string;
   videoSent: string;
@@ -177,6 +179,7 @@ export function normalizeRows(rows: RawRow[]): LeadRecord[] {
         profileUrl,
         notes,
         notesCell: noteText,
+        appointment: cell(row, "Appointment", 17).toLowerCase(),
         conversation: summaryText,
         videoSent,
         timestamp,

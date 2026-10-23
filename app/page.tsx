@@ -15,6 +15,16 @@ type LeadRecord,
 import { sourceConfig } from "../lib/source-config";
 import { notesConfig } from "../lib/notes-config";
 type StatusValue = "P" | "A" | "";
+type AppointmentValue = "asked" | "set" | "met" | "";
+const appointmentOptions: { value: Exclude<AppointmentValue, "">; label: string }[] = [
+{ value: "asked", label: "Asked for appointment" },
+{ value: "set", label: "Set appointment" },
+{ value: "met", label: "Actually met" },
+];
+function effectiveAppointment(record: LeadRecord): AppointmentValue {
+const value = record.appointment.trim().toLowerCase();
+return value === "asked" || value === "set" || value === "met" ? value : "";
+}
 function statusKey(record: LeadRecord) {
 return record.profileUrl || (record.firstName + "-" + record.lastName).toLowerCase();
 }
@@ -70,6 +80,9 @@ return postToSheet(record, { notes: value });
 async function postStatus(record: LeadRecord, value: StatusValue) {
 return postToSheet(record, { status: value });
 }
+async function postAppointment(record: LeadRecord, value: AppointmentValue) {
+return postToSheet(record, { appointment: value });
+}
 function NotesEditor({ record, draft, onDraftChange, onSaved }: { record: LeadRecord; draft?: string; onDraftChange: (record: LeadRecord, value: string | undefined) => void; onSaved: (record: LeadRecord, value: string) => void }) {
 const shown = effectiveNote(record.notesCell, draft);
 const [state, setState] = useState<SaveState>("idle");
@@ -104,7 +117,28 @@ return (
 </div>
 );
 }
-function LeadCard({ record, archived, pinned, busy, draft, onViewConversation, onArchive, onPin, onDraftChange, onSaved }: { record: LeadRecord; archived?: boolean; pinned?: boolean; busy?: boolean; draft?: string; onViewConversation: (record: LeadRecord) => void; onArchive: (record: LeadRecord) => void; onPin: (record: LeadRecord) => void; onDraftChange: (record: LeadRecord, value: string | undefined) => void; onSaved: (record: LeadRecord, value: string) => void }) {
+function AppointmentRadios({ record, value, busy, onChange }: { record: LeadRecord; value: AppointmentValue; busy?: boolean; onChange: (record: LeadRecord, value: AppointmentValue) => void }) {
+return (
+<div className="appointment-block" onMouseDown={(event) => event.stopPropagation()}>
+<div className="appointment-label">Appointment</div>
+<div className="appointment-options" role="radiogroup" aria-label="Appointment progress">
+{appointmentOptions.map((option) => (
+<label key={option.value} className={"appointment-option" + (value === option.value ? " selected" : "")}>
+<input
+type="radio"
+name={"appointment-" + (record.profileUrl || record.id)}
+checked={value === option.value}
+disabled={busy}
+onChange={() => onChange(record, value === option.value ? "" : option.value)}
+/>
+{option.label}
+</label>
+))}
+</div>
+</div>
+);
+}
+function LeadCard({ record, archived, pinned, busy, draft, appointment, appointmentBusy, onAppointmentChange, onViewConversation, onArchive, onPin, onDraftChange, onSaved }: { record: LeadRecord; archived?: boolean; pinned?: boolean; busy?: boolean; draft?: string; appointment: AppointmentValue; appointmentBusy?: boolean; onAppointmentChange: (record: LeadRecord, value: AppointmentValue) => void; onViewConversation: (record: LeadRecord) => void; onArchive: (record: LeadRecord) => void; onPin: (record: LeadRecord) => void; onDraftChange: (record: LeadRecord, value: string | undefined) => void; onSaved: (record: LeadRecord, value: string) => void }) {
 return (
 <article className="lead-card">
 <div className="lead-heading">
@@ -122,6 +156,7 @@ return (
 </div>
 {record.kind === "reply-before-video" ? <p className="manual-note">Stop video manually in the Sheet if needed.</p> : null}
 {record.sourceIncomplete ? <p className="data-note">Some source details are incomplete.</p> : null}
+<AppointmentRadios record={record} value={appointment} busy={appointmentBusy} onChange={onAppointmentChange} />
 <NotesEditor record={record} draft={draft} onDraftChange={onDraftChange} onSaved={onSaved} />
 <div className="card-footer">
 <div className="card-actions card-toggle-actions">
@@ -173,6 +208,26 @@ const currentStatus = useCallback((record: LeadRecord): StatusValue => {
 const key = statusKey(record);
 return key in optimisticStatus ? optimisticStatus[key] : effectiveStatus(record);
 }, [optimisticStatus]);
+const [appointmentOptimistic, setAppointmentOptimistic] = useState<Record<string, AppointmentValue>>({});
+const [appointmentBusy, setAppointmentBusy] = useState<Record<string, boolean>>({});
+const currentAppointment = useCallback((record: LeadRecord): AppointmentValue => {
+const key = statusKey(record);
+return key in appointmentOptimistic ? appointmentOptimistic[key] : effectiveAppointment(record);
+}, [appointmentOptimistic]);
+const changeAppointment = useCallback(async (record: LeadRecord, next: AppointmentValue) => {
+const key = statusKey(record);
+const previous = currentAppointment(record);
+setAppointmentBusy((current) => ({ ...current, [key]: true }));
+setAppointmentOptimistic((current) => ({ ...current, [key]: next }));
+try {
+await postAppointment(record, next);
+} catch (caught) {
+setAppointmentOptimistic((current) => ({ ...current, [key]: previous }));
+setError(caught instanceof Error ? caught.message : "The appointment status could not be saved.");
+} finally {
+setAppointmentBusy((current) => ({ ...current, [key]: false }));
+}
+}, [currentAppointment]);
 const writeStatus = useCallback(async (record: LeadRecord, next: StatusValue) => {
 const key = statusKey(record);
 const previous = currentStatus(record);
@@ -227,6 +282,7 @@ if (!response.ok) throw new Error("The Sheet could not be read right now.");
 const nextRecords = normalizeRows(parseCsv(await response.text()));
 if (!nextRecords.length) throw new Error("The Sheet returned no usable activity records.");
 setOptimisticStatus({});
+setAppointmentOptimistic({});
 setRecords(nextRecords);
 setRefreshedAt(new Date().toISOString());
 } catch (caught) {
@@ -298,7 +354,7 @@ return (
 <p>Prospects you have pinned for closer attention.</p>
 </div>
 <div className="lead-grid active-grid">
-{pinned.map((record) => <LeadCard key={record.id} record={record} pinned archived={currentStatus(record) === "A"} busy={busyFor(record)} draft={noteDrafts[statusKey(record)]} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onDraftChange={changeDraft} onSaved={markSaved} />)}
+{pinned.map((record) => <LeadCard key={record.id} record={record} pinned archived={currentStatus(record) === "A"} busy={busyFor(record)} draft={noteDrafts[statusKey(record)]} appointment={currentAppointment(record)} appointmentBusy={Boolean(appointmentBusy[statusKey(record)])} onAppointmentChange={changeAppointment} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onDraftChange={changeDraft} onSaved={markSaved} />)}
 </div>
 </section>
 ) : null}
@@ -308,7 +364,7 @@ return (
 <p>Most recent video watch first, then most recent video sent.</p>
 </div>
 <div className="lead-grid">
-{unpinnedActions.length ? unpinnedActions.map((record) => <LeadCard key={record.id} record={record} pinned={currentStatus(record) === "P"} archived={currentStatus(record) === "A"} busy={busyFor(record)} draft={noteDrafts[statusKey(record)]} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onDraftChange={changeDraft} onSaved={markSaved} />) : <p className="queue-empty">No prospects match this view.</p>}
+{unpinnedActions.length ? unpinnedActions.map((record) => <LeadCard key={record.id} record={record} pinned={currentStatus(record) === "P"} archived={currentStatus(record) === "A"} busy={busyFor(record)} draft={noteDrafts[statusKey(record)]} appointment={currentAppointment(record)} appointmentBusy={Boolean(appointmentBusy[statusKey(record)])} onAppointmentChange={changeAppointment} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onDraftChange={changeDraft} onSaved={markSaved} />) : <p className="queue-empty">No prospects match this view.</p>}
 </div>
 </section>
 <section className="all-cards-section archive-section" aria-live="polite">
@@ -317,7 +373,7 @@ return (
 <p>Most recent video watch first.</p>
 </div>
 <div className="lead-grid">
-{archived.length ? archived.map((record) => <LeadCard key={record.id} record={record} pinned={currentStatus(record) === "P"} archived busy={busyFor(record)} draft={noteDrafts[statusKey(record)]} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onDraftChange={changeDraft} onSaved={markSaved} />) : <p className="queue-empty">No archived prospects.</p>}
+{archived.length ? archived.map((record) => <LeadCard key={record.id} record={record} pinned={currentStatus(record) === "P"} archived busy={busyFor(record)} draft={noteDrafts[statusKey(record)]} appointment={currentAppointment(record)} appointmentBusy={Boolean(appointmentBusy[statusKey(record)])} onAppointmentChange={changeAppointment} onViewConversation={setSelectedRecord} onArchive={toggleArchive} onPin={togglePin} onDraftChange={changeDraft} onSaved={markSaved} />) : <p className="queue-empty">No archived prospects.</p>}
 </div>
 </section>
 </>
